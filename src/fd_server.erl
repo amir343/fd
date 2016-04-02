@@ -23,7 +23,14 @@
           register_node/1,
           deregister_node/1,
           get_nodes/0,
-          is_alive/1]).
+          is_alive/1,
+          get_histories/1,
+          set_heartbeat_interval_ms/1,
+          set_threshold/1,
+          set_max_sample_size/1,
+          get_heartbeat_interval_ms/0,
+          get_threshold/0,
+          get_max_sample_size/0]).
 
 -include("history_rec.hrl").
 
@@ -36,11 +43,21 @@
 %% Using exponential probability distribution ie. putting higher weights to recent heartbeats
 -define(PHI_FACTOR, (1.0/ math:log(10.0))).
 
+%% Maximum number of interval history to keep
+-define(MAX_SAMPLE_SIZE, 100).
+
+-record(config,
+        {heartbeat_interval = ?HEARTBEAT_INTERVAL :: pos_integer(),
+        threshold           = ?THRESHOLD          :: float(),
+        max_sample_size     = ?MAX_SAMPLE_SIZE    :: pos_integer()}).
+
+-type config() :: #config{}.
+
 %% Keeps internal state of this failure detector
 -record(state,
-        {nodes = [] :: [term()],
-        node_histories = [] :: [#node_history{}]}).
-
+        {nodes         = []         :: [term()],
+        node_histories = []         :: [node_history()],
+        config         = #config{}  :: config()}).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%      Public API
@@ -49,18 +66,22 @@
 %% @doc
 %% Registers a new node to be monitored by this Failure Detector
 %% @end
--spec register_node/1 :: (node()) -> ok.
-register_node(Node) ->
-    gen_server:cast({fd, node()}, {register, Node}),
-    ok.
+-spec register_node/1 :: (node()) -> ok;
+                         ([]) -> ok;
+                         ([node()]) -> ok.
+register_node([]) ->
+    ok;
+register_node(Nodes) when is_list(Nodes) ->
+    gen_server:cast({fd, node()}, {register, Nodes});
+register_node(Node) when is_atom(Node) ->
+    register_node([Node]).
 
 %% @doc
 %% De-registers an existing node from been monitoring by this Failure Detector
 %% @end
 -spec deregister_node/1 :: (node()) -> ok.
 deregister_node(Node) ->
-    gen_server:cast({fd, node()}, {deregister, Node}),
-    ok.
+    gen_server:cast({fd, node()}, {deregister, Node}).
 
 %% @doc
 %% This method returns nodes that are under the control of this Failure Detector
@@ -77,6 +98,37 @@ get_nodes() ->
 is_alive(Node) when is_atom(Node) ->
     gen_server:call(fd, {is_alive, Node}).
 
+%% @doc
+%% Returns the histories kept for a node or 'not_found'
+%% @end
+-spec get_histories/1 :: (node()) -> history() | not_found.
+get_histories(Node) ->
+    gen_server:call({fd, node()}, {get_histories, Node}).
+
+-spec set_heartbeat_interval_ms/1 :: (pos_integer()) -> ok.
+set_heartbeat_interval_ms(Interval) when is_integer(Interval), Interval >= 0 ->
+    gen_server:cast({fd, node()}, {set_heartbeat_interval, Interval}).
+
+-spec get_heartbeat_interval_ms/0 :: () -> pos_integer().
+get_heartbeat_interval_ms() ->
+    gen_server:call({fd, node()}, {get_heartbeat_interval}).
+
+-spec set_threshold/1 :: (float()) -> ok.
+set_threshold(Threshold) when is_float(Threshold) ->
+    gen_server:cast({fd, node()}, {set_threshold, Threshold}).
+
+-spec get_threshold/0 :: () -> float().
+get_threshold() ->
+    gen_server:call({fd, node()}, {get_threshold}).
+
+-spec set_max_sample_size/1 :: (pos_integer()) -> ok.
+set_max_sample_size(Size) when is_integer(Size), Size > 0 ->
+    gen_server:cast({fd, node()}, {set_max_sample_size, Size}).
+
+-spec get_max_sample_size/0 :: () -> pos_integer().
+get_max_sample_size() ->
+    gen_server:call({fd, node()}, {get_max_sample_size}).
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%      GEN_SERVER METHODS
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -88,33 +140,62 @@ init([]) ->
     timer:apply_after(1000, gen_server, cast, [{fd, node()}, send_heartbeat]),
     {ok, #state{}}.
 
-handle_call({is_alive, Node}, _From, State=#state{node_histories = Hs}) ->
-    {reply, is_available(Node, Hs), State};
+handle_call({is_alive, Node}, _From, State=#state{node_histories = Hs, config = C}) ->
+    {reply, is_available(Node, Hs, C), State};
+
 handle_call({get_histories, Node}, _From, State=#state{node_histories = Hs}) ->
     Result = case node_histories:find(Node, Hs) of
         #node_history{node = _, latest_timestamp = _, history = H}       -> H;
         false                                                            -> not_found
     end,
     {reply, Result, State};
-handle_call({get_nodes}, _From, State=#state{nodes = Ns}) ->
-    {reply, Ns, State}.
 
-handle_cast(send_heartbeat, State=#state{nodes = Ns}) ->
-    send_heartbeat_to_nodes(Ns),
+handle_call({get_nodes}, _From, State=#state{nodes = Ns}) ->
+    {reply, Ns, State};
+
+handle_call({get_heartbeat_interval}, _From, State=#state{config = C}) ->
+    {reply, C#config.heartbeat_interval, State};
+
+handle_call({get_threshold}, _From, State=#state{config = C}) ->
+    {reply, C#config.threshold, State};
+
+handle_call({get_max_sample_size}, _From, State=#state{config = C}) ->
+    {reply, C#config.max_sample_size, State}.
+
+
+
+handle_cast(send_heartbeat, State=#state{nodes = Ns, config = C}) ->
+    send_heartbeat_to_nodes(Ns, C#config.heartbeat_interval),
     {noreply, State};
+
 handle_cast({heartbeat, Node}, State) ->
     gen_server:cast({fd, Node}, {alive, node()}),
     {noreply, State};
-handle_cast({alive, Node}, #state{nodes = Ns, node_histories = Hs}) ->
-    NHistories = received_alive(Node, Hs),
-    {noreply, #state{nodes = Ns, node_histories = NHistories}};
-handle_cast({register, Node}, #state{nodes = Nodes, node_histories = Hs}) ->
-    io:format("Node ~p is registered~n", [Node]),
-    {noreply, #state{nodes = [Node | Nodes], node_histories = Hs}};
-handle_cast({deregister, Node}, #state{nodes = Ns, node_histories = H}) ->
+
+handle_cast({alive, Node}, State=#state{nodes = Ns, node_histories = Hs, config = C}) ->
+    NHistories = received_alive(Node, Hs, C),
+    {noreply, State#state{nodes = Ns, node_histories = NHistories}};
+
+handle_cast({register, Nodes}, State=#state{nodes = Ns, node_histories = Hs}) ->
+    Diff = Nodes -- Ns,
+    NNs = Diff ++ Ns,
+    {noreply, State#state{nodes = NNs, node_histories = Hs}};
+
+handle_cast({deregister, Node}, State=#state{nodes = Ns, node_histories = H}) ->
     {NewNs, NHistory} = deregister_node(Node, Ns, H),
     io:format("Node ~p is deregistered~n", [Node]),
-    {noreply, #state{nodes = NewNs, node_histories = NHistory}}.
+    {noreply, State#state{nodes = NewNs, node_histories = NHistory}};
+
+handle_cast({set_heartbeat_interval, Interval}, State=#state{config = C}) ->
+    {noreply, State#state{config = C#config{heartbeat_interval = Interval}}};
+
+handle_cast({set_threshold, Threshold}, State=#state{config = C}) ->
+    {noreply, State#state{config = C#config{threshold = Threshold}}};
+
+handle_cast({set_max_sample_size, Size}, State=#state{config = C}) ->
+    {noreply, State#state{config = C#config{max_sample_size = Size}}}.
+
+
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -132,33 +213,31 @@ code_change(_OldVsn, State, _Extra) ->
 
 %%
 %% @private
--spec send_heartbeat_to_nodes/1 :: ([node()]) -> any().
-send_heartbeat_to_nodes(Nodes) ->
-    [gen_server:cast({fd, Node}, {heartbeat, node()}) || Node <- Nodes],
-    timer:apply_after(?HEARTBEAT_INTERVAL, gen_server, cast, [{fd, node()}, send_heartbeat]).
+-spec send_heartbeat_to_nodes/2 :: ([node()], pos_integer()) -> any().
+send_heartbeat_to_nodes(Nodes, HeartbeatInt) ->
+    catch([gen_server:cast({fd, Node}, {heartbeat, node()}) || Node <- Nodes]),
+    timer:apply_after(HeartbeatInt, gen_server, cast, [{fd, node()}, send_heartbeat]).
 
 %%
 %% @private
--spec deregister_node/3 :: (node(), [node()], [#node_history{}]) -> {[node()], [#node_history{}]}.
+-spec deregister_node/3 :: (node(), [node()], [node_history()]) -> {[node()], [node_history()]}.
 deregister_node(Node, Nodes, Histories) ->
     {lists:delete(Node, Nodes), node_histories:delete(Node, Histories)}.
 
 %%
 %% @private
--spec received_alive/2 :: (node(), [#node_history{}]) -> [#node_history{}].
-received_alive(Node, Histories) ->
-    io:format("Received heartbeat from ~p~n", [Node]),
-
+-spec received_alive/3 :: (node(), [node_history()], config()) -> [node_history()].
+received_alive(Node, Histories, C) ->
     Now = timestamp_millis(),
     case node_histories:find(Node, Histories) of
         #node_history{node = Node, latest_timestamp = LatestTs, history = History} ->
             case LatestTs =:= 0 of
                 true ->
-                    NHistory = heartbeat_history:append(History, ?HEARTBEAT_INTERVAL div 2),
+                    NHistory = heartbeat_history:append(History, C#config.max_sample_size div 2, C#config.max_sample_size),
                     node_histories:update(Node, Histories, node_histories:from(Node, Now, NHistory));
                 false ->
                     Interval = Now - LatestTs,
-                    NHistory = heartbeat_history:append(History, Interval),
+                    NHistory = heartbeat_history:append(History, Interval, C#config.max_sample_size),
                     node_histories:update(Node, Histories, node_histories:from(Node, Now, NHistory))
             end;
         false ->
@@ -167,24 +246,24 @@ received_alive(Node, Histories) ->
 
 %%
 %% @private
--spec is_available/2 :: (node(), [#node_history{}]) -> { node_available | node_unavailable, float()}.
-is_available(Node, Histories) ->
-    Phi = phi(Node, Histories),
-    case Phi < ?THRESHOLD of
+-spec is_available/3 :: (node(), [node_history()], config()) -> { node_available | node_unavailable, float()}.
+is_available(Node, Histories, Config=#config{}) ->
+    Phi = phi(Node, Histories, Config#config.heartbeat_interval),
+    case Phi < Config#config.threshold of
         true  -> {node_available, Phi};
         false -> {node_unavailable, Phi}
     end.
 
 %%
 %% @private
--spec phi/2 :: (node(), [#node_history{}]) -> float() | infinity.
-phi(Node, Histories) ->
+-spec phi/3 :: (node(), [node_history()], pos_integer()) -> float() | infinity.
+phi(Node, Histories, HeartbeatInt) ->
     case node_histories:find(Node, Histories) of
         #node_history{node = Node, latest_timestamp = LatestTs,
                       history = #history{intervals = L, interval_sum = _} = H} ->
             Now = timestamp_millis(),
             TimeDiff = case Now - LatestTs =:= 0 of
-                           true  -> ?HEARTBEAT_INTERVAL div 2;
+                           true  -> HeartbeatInt div 2;
                            false -> Now - LatestTs
                        end,
             case length(L) > 0 of

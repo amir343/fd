@@ -9,50 +9,37 @@
 -author("Amir Moulavi").
 
 %% API
--export([new/0, append/2, mean/1]).
-
-%% Maximum number of interval history to keep
--define(MAX_SAMPLE_SIZE, 100).
+-export([new/0, append/3, mean/1]).
 
 -include("history_rec.hrl").
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-%%
-%%
-%%
--spec new/0 :: () -> #history{}.
+-spec new/0 :: () -> history().
 new() ->
     #history{}.
 
-%%
-%%
-%%
--spec append/2 :: (#history{}, integer()) -> #history{}.
-append(History=#history{}, Interval) ->
-    case length(History#history.intervals) < ?MAX_SAMPLE_SIZE of
+-spec append/3 :: (history(), pos_integer(), pos_integer()) -> history().
+append(History=#history{}, Interval, MaxSampleSize) ->
+    case length(History#history.intervals) < MaxSampleSize of
         true ->
             #history {
                intervals = [Interval | History#history.intervals],
                interval_sum = History#history.interval_sum + Interval};
         _ ->
-            append(drop_oldest(History), Interval)
+            append(drop_oldest(History), Interval, MaxSampleSize)
     end.
 
-%%
-%%
-%%
--spec mean/1 :: (#history{}) -> float().
+-spec mean/1 :: (history()) -> float().
 mean(History=#history{}) ->
     case length(History#history.intervals) of
         0 -> 0.0;
         N -> History#history.interval_sum / N
     end.
 
-%%
-%%
+
 %% @private
--spec drop_oldest/1 :: (#history{}) -> #history{}.
+-spec drop_oldest/1 :: (history()) -> history().
 drop_oldest(History=#history{}) ->
     OldestValue = lists:last(History#history.intervals),
     #history {
