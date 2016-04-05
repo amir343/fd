@@ -22,7 +22,7 @@ And also stop the application like this:
 (node1@localhost)1> application:stop(fd).
 ok
 ```
-For list of API you can call you can refer to [`fd_server.erl`](https://github.com/amir343/fd/blob/master/src/fd_server.erl) file.
+For list of API you can call you can refer to [`fd.erl`](https://github.com/amir343/fd/blob/master/src/fd.erl) file.
 
 
 License
