@@ -56,7 +56,7 @@
 %% Keeps internal state of this failure detector
 -record(state,
         {nodes         = []         :: [term()],
-        node_histories = []         :: [node_history()],
+        node_histories = dict:new() :: dict(),
         config         = #config{}  :: config()}).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -144,9 +144,9 @@ handle_call({is_alive, Node}, _From, State=#state{node_histories = Hs, config = 
     {reply, is_available(Node, Hs, C), State};
 
 handle_call({get_histories, Node}, _From, State=#state{node_histories = Hs}) ->
-    Result = case node_histories:find(Node, Hs) of
-        #node_history{node = _, latest_timestamp = _, history = H}       -> H;
-        false                                                            -> not_found
+    Result = case dict:find(Node, Hs) of
+               {ok, #node_history{node = _, latest_timestamp = _, history = H}}  -> H;
+               _                                                                 -> not_found
     end,
     {reply, Result, State};
 
@@ -220,33 +220,34 @@ send_heartbeat_to_nodes(Nodes, HeartbeatInt) ->
 
 %%
 %% @private
--spec deregister_node/3 :: (node(), [node()], [node_history()]) -> {[node()], [node_history()]}.
+-spec deregister_node/3 :: (node(), [node()], dict()) -> {[node()], dict()}.
 deregister_node(Node, Nodes, Histories) ->
-    {lists:delete(Node, Nodes), node_histories:delete(Node, Histories)}.
+    {lists:delete(Node, Nodes), dict:erase(Node, Histories)}.
 
 %%
 %% @private
--spec received_alive/3 :: (node(), [node_history()], config()) -> [node_history()].
+-spec received_alive/3 :: (node(), dict(), config()) -> dict().
 received_alive(Node, Histories, C) ->
     Now = timestamp_millis(),
-    case node_histories:find(Node, Histories) of
-        #node_history{node = Node, latest_timestamp = LatestTs, history = History} ->
+
+    case dict:find(Node, Histories) of
+        {ok, #node_history{node = Node, latest_timestamp = LatestTs, history = History}} ->
             case LatestTs =:= 0 of
                 true ->
                     NHistory = heartbeat_history:append(History, C#config.max_sample_size div 2, C#config.max_sample_size),
-                    node_histories:update(Node, Histories, node_histories:from(Node, Now, NHistory));
+                    dict:store(Node, to_node_history(Node, Now, NHistory), Histories);
                 false ->
                     Interval = Now - LatestTs,
                     NHistory = heartbeat_history:append(History, Interval, C#config.max_sample_size),
-                    node_histories:update(Node, Histories, node_histories:from(Node, Now, NHistory))
+                    dict:store(Node, to_node_history(Node, Now, NHistory), Histories)
             end;
-        false ->
-            node_histories:new(Node)
+        error ->
+            dict:store(Node, #node_history{node = Node, latest_timestamp = 0, history = heartbeat_history:new()}, Histories)
     end.
 
 %%
 %% @private
--spec is_available/3 :: (node(), [node_history()], config()) -> { node_available | node_unavailable, float()}.
+-spec is_available/3 :: (node(), dict(), config()) -> { node_available | node_unavailable, float()}.
 is_available(Node, Histories, Config=#config{}) ->
     Phi = phi(Node, Histories, Config#config.heartbeat_interval),
     case Phi < Config#config.threshold of
@@ -256,11 +257,11 @@ is_available(Node, Histories, Config=#config{}) ->
 
 %%
 %% @private
--spec phi/3 :: (node(), [node_history()], pos_integer()) -> float() | infinity.
+-spec phi/3 :: (node(), dict(), pos_integer()) -> float() | infinity.
 phi(Node, Histories, HeartbeatInt) ->
-    case node_histories:find(Node, Histories) of
-        #node_history{node = Node, latest_timestamp = LatestTs,
-                      history = #history{intervals = L, interval_sum = _} = H} ->
+    case dict:find(Node, Histories) of
+        {ok, #node_history{node = Node, latest_timestamp = LatestTs,
+                      history = #history{intervals = L, interval_sum = _} = H}} ->
             Now = timestamp_millis(),
             TimeDiff = case Now - LatestTs =:= 0 of
                            true  -> HeartbeatInt div 2;
@@ -281,3 +282,8 @@ timestamp_millis() ->
     {Mega, Sec, Micro} = erlang:timestamp(),
     (Mega * 1000000 + Sec) * 1000 + round(Micro/1000).
 
+%%
+%% @private
+-spec to_node_history/3 :: (node(), integer(), history()) -> node_history().
+to_node_history(Node, LatestTimestamp, History) ->
+  #node_history{node = Node, latest_timestamp = LatestTimestamp, history = History}.
