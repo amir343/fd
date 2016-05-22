@@ -16,14 +16,20 @@
 
 
 init([]) ->
-    Server = {fd_server,                     % ID
-              {fd_server, init, []},         % Server
-              permanent,                     % Restart
-              2000,                          % Shutdown
-              worker,                        % Type
-              [fd_server]                    % Modules
-             },
+  Server = {fd_server,                     % ID
+            {fd_server, init, []},         % Server
+            permanent,                     % Restart
+            2000,                          % Shutdown
+            worker,                        % Type
+            [fd_server]                    % Modules
+           },
 
-    Children = [Server],
-    RestartStrategy = {one_for_one, 4, 3600},
-    {ok, RestartStrategy, Children}.
+  Children = [Server],
+  RestartStrategy = {one_for_one, 4, 3600},
+  {ok, RestartStrategy, Children}.
+
+%%%_* Emacs ====================================================================
+%%% Local Variables:
+%%% allout-layout: t
+%%% erlang-indent-level: 2
+%%% End:

@@ -6,7 +6,7 @@ Phi Accrual Failure Detector
 ### How to build the project
 In order to build and run the project make sure you have Erlang/OTP 18 or newer is installed. In the root of the project run the following:
 ```
-> erl -make
+> make compile
 > erl -pa ebin/ -I include/ -sname node1
 ```
 `node1` is just a name given to that Erlang node. Once inside the shell, you can start the application like this:

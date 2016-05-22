@@ -15,7 +15,13 @@
 
 
 start(_StartType, _StartArgs) ->
-    fd_server:start_link().
+  fd_server:start_link().
 
 stop(State) ->
-    fd_server:terminate(normal, State).
+  fd_server:terminate(normal, State).
+
+%%%_* Emacs ====================================================================
+%%% Local Variables:
+%%% allout-layout: t
+%%% erlang-indent-level: 2
+%%% End:
